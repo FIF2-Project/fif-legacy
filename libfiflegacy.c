@@ -1,45 +1,83 @@
 /*
- * ConvertLegacyFIFtoPNG.h
+ * libfiflegacy.c
  * ======================================================================
  * ©2026 by Rezar Behzad | www.RezarBehzad.com | Germany
  *
- * Single-file C/C++ library: converts legacy Fractal Image Format files
- * (*.fif, Iterated Systems FTC/FIF1 family) to PNG.  Plain C99, also
- * compiles as C++.  No dependencies except the C standard library
- * (stdio.h, stdlib.h, string.h, stdint.h) - zlib/libpng are NOT needed,
- * the PNG/deflate encoder is built in.  No endianness or alignment
- * assumptions: all integers are assembled byte by byte.
+ * Single-file C/C++ library for legacy Fractal Image Format files
+ * (*.fif, Iterated Systems FTC/FIF1 family).  Plain C99, also compiles
+ * as C++.  Only the C standard library is used (stdio, stdlib, string,
+ * stdint, stddef, stdarg) - no zlib/libpng, the PNG/deflate encoder is
+ * built in.  No endianness or alignment assumptions: all integers are
+ * assembled byte by byte, so it builds with clang/gcc/MSVC on any CPU.
  *
  * ----------------------------------------------------------------------
- * USAGE
+ * THE FUNCTION
  * ----------------------------------------------------------------------
- *   #include "ConvertLegacyFIFtoPNG.h"
+ *   FIF_RESULT *ConvertLegacyFIFtoPNG(const char *fifPath,
+ *                                     const char *pngPath,
+ *                                     int modus);
  *
- *   int rc = ConvertLegacyFIFtoPNG("pictures/DOLPHIN.FIF", "out/dolphin.png");
- *   if (rc != FIF_OK) { ... see error codes below ... }
- *
- * The header contains declaration AND implementation.  Include it normally
- * in exactly ONE .c/.cpp file.  If further source files need the prototype,
- * define CONVERTLEGACYFIF_DECLARATION_ONLY before including it there:
- *
- *   #define CONVERTLEGACYFIF_DECLARATION_ONLY
- *   #include "ConvertLegacyFIFtoPNG.h"
- *
- * Build example:  clang -std=c99 -O2 -c main.c      (C)
- *                 clang++ -O2 -c main.cpp           (C++)
- *
- * ----------------------------------------------------------------------
- * PARAMETERS
- * ----------------------------------------------------------------------
  *   fifPath  path + file name of the input file.  The name MUST end in
- *            ".fif" (case-insensitive: .fif/.FIF/.Fif ...), otherwise
- *            FIF_ERR_EXTENSION is returned without touching the file.
- *   pngPath  path + file name of the PNG to create.  The directory must
- *            exist.  The PNG is first written to "<pngPath>.tmp" and then
- *            renamed, so no half-written PNG is left behind on errors.
- *            An existing file at pngPath is replaced.
+ *            ".fif" (case-insensitive), otherwise FIF_ERR_EXTENSION.
+ *   pngPath  path + file name of the PNG to create (only used in modus 1,
+ *            may be NULL in modus 2 and 3).
+ *   modus    FIF_MODE_FILE   (1): convert and write the PNG file to disk
+ *            FIF_MODE_MEMORY (2): convert and return the complete PNG file
+ *                                 in memory (result->data, result->size);
+ *                                 nothing is written to disk
+ *            FIF_MODE_INFO   (3): return only a text block with information
+ *                                 about the file (result->text), one piece
+ *                                 of information per line, "Key: value"
+ *
+ * Return value: pointer to a FIF_RESULT (see below).  It is ONE single
+ * memory block (structure + PNG data or text), release it with ONE call
+ * of free(result) - in every modus, also on errors.  NULL is returned
+ * only if not even the small result structure could be allocated.
+ *
+ *   result->error   FIF_OK (0) or one of the FIF_ERR_... codes below
+ *   result->modus   the modus that was requested
+ *   result->width   image width  in pixels (0 if not decoded)
+ *   result->height  image height in pixels (0 if not decoded)
+ *   result->data    modus 2: pointer to the PNG file bytes
+ *                   modus 3: pointer to the text (same as result->text)
+ *                   modus 1: NULL
+ *   result->size    modus 2: number of PNG bytes
+ *                   modus 3: text length in bytes (without the final NUL)
+ *   result->text    modus 3: NUL-terminated text, lines end with '\n'
+ *
+ * Modus 3 always delivers a text block when memory permits, also for
+ * files that cannot be converted (videos, damaged files, wrong extension):
+ * the header details that could be read are listed and the lines
+ * "Decodable:" and "Status:" tell the reason.  result->error then holds
+ * the same code that modus 1/2 would return.
+ *
+ * ----------------------------------------------------------------------
+ * EXAMPLES
+ * ----------------------------------------------------------------------
+ *   #include "libfiflegacy.c"
+ *
+ *   FIF_RESULT *r = ConvertLegacyFIFtoPNG("in/DOLPHIN.FIF", "out/dolphin.png", FIF_MODE_FILE);
+ *   if (r && r->error != FIF_OK) printf("error %d\n", r->error);
+ *   free(r);
+ *
+ *   r = ConvertLegacyFIFtoPNG("in/DOLPHIN.FIF", NULL, FIF_MODE_MEMORY);
+ *   if (r && r->error == FIF_OK) use_png_bytes(r->data, r->size);
+ *   free(r);
+ *
+ *   r = ConvertLegacyFIFtoPNG("in/DOLPHIN.FIF", NULL, FIF_MODE_INFO);
+ *   if (r) fputs(r->text, stdout);
+ *   free(r);
+ *
+ * Integration: either compile libfiflegacy.c as its own source file, or
+ * #include "libfiflegacy.c" in exactly ONE source file.  Other source
+ * files that only need the declarations write:
+ *
+ *   #define LIBFIFLEGACY_DECLARATION_ONLY
+ *   #include "libfiflegacy.c"
  *
  * The function is reentrant / thread-safe (no global mutable state).
+ * In modus 1 the PNG is first written to "<pngPath>.tmp" and then renamed,
+ * so no half-written PNG remains on errors; an existing file is replaced.
  *
  * ----------------------------------------------------------------------
  * SUPPORTED PROFILES (see the FTC/FIF1 format specification)
@@ -50,9 +88,10 @@
  *   - Progressive FIF1, color (EUV) and gray                      Part III
  * Output: 8-bit truecolor RGB PNG (gray images as R=G=B).
  *
- * NOT supported (a specific error code is returned):
- *   - P.OEM Video 2.0 (FTC profiles 0x0201/0x0202) and FJF video
- *     (FTC 2.2)                                    -> FIF_ERR_VIDEO
+ * NOT convertible (a specific error code is returned; modus 3 still
+ * describes the file):
+ *   - P.OEM Video 2.0 (FTC 0x0201/0x0202) and FJF video (FTC 2.2)
+ *                                                  -> FIF_ERR_VIDEO
  *   - arithmetic-coded FTC 3.3 (side-channel deltas) and arithmetic
  *     "dictionary" classes                         -> FIF_ERR_UNSUPPORTED
  *
@@ -80,22 +119,29 @@
  *     plane-relative range coordinate.
  *   - Fixed FTC 1.1: last mask maps state 0 -> class 1, state 1 -> class 0
  *     (literal reading, confirmed).
- * Tested with clang-compatible strict flags (C99/C11/C17, C++98..C++20),
- * AddressSanitizer/UBSan and a fuzz run with 700+ corrupted files.
  */
-#ifndef CONVERTLEGACYFIFTOPNG_H
-#define CONVERTLEGACYFIFTOPNG_H
+#ifndef LIBFIFLEGACY_DECLARATIONS
+#define LIBFIFLEGACY_DECLARATIONS
+
+#include <stddef.h>
 
 /* ----------------------------------------------------------------------
- * RETURN / ERROR CODES of ConvertLegacyFIFtoPNG()
+ * MODES (third parameter "modus")
  * -------------------------------------------------------------------- */
-#define FIF_OK                   0   /* success, PNG file was written                         */
-#define FIF_ERR_ARGUMENT        (-1) /* fifPath or pngPath is NULL or an empty string         */
+#define FIF_MODE_FILE    1   /* convert, write PNG file to pngPath                  */
+#define FIF_MODE_MEMORY  2   /* convert, return PNG file bytes in result->data       */
+#define FIF_MODE_INFO    3   /* return a text block with file information            */
+
+/* ----------------------------------------------------------------------
+ * ERROR CODES (result->error)
+ * -------------------------------------------------------------------- */
+#define FIF_OK                   0   /* success                                                */
+#define FIF_ERR_ARGUMENT        (-1) /* fifPath NULL/empty, or pngPath NULL/empty in modus 1   */
 #define FIF_ERR_EXTENSION       (-2) /* fifPath does not end in ".fif" (case-insensitive)     */
 #define FIF_ERR_OPEN            (-3) /* input file cannot be opened or read                   */
 #define FIF_ERR_UNKNOWN_FORMAT  (-4) /* no FTC/FIF1 signature: not a fractal image file       */
 #define FIF_ERR_VIDEO           (-5) /* fractal VIDEO file (P.OEM 0x0201/0x0202 or FJF 2.2):  */
-                                     /* recognised, but video is not supported                */
+                                     /* recognised, but video is not converted                */
 #define FIF_ERR_UNSUPPORTED     (-6) /* recognised fractal file, but an unsupported variant   */
                                      /* (unknown generation/family/color code, arithmetic     */
                                      /* FTC 3.3, arithmetic dictionary classes ...)           */
@@ -105,22 +151,39 @@
                                      /* not found (or does not match) in the .fif directory   */
 #define FIF_ERR_MEMORY          (-9) /* out of memory                                         */
 #define FIF_ERR_TOO_LARGE      (-10) /* input file > 1 GiB or image > 268 million pixels      */
-#define FIF_ERR_WRITE          (-11) /* PNG file cannot be created/written/renamed            */
+#define FIF_ERR_WRITE          (-11) /* modus 1: PNG file cannot be created/written/renamed   */
+#define FIF_ERR_MODE           (-12) /* modus is not 1, 2 or 3                                */
+
+/* ----------------------------------------------------------------------
+ * RESULT (one memory block, release with free())
+ * -------------------------------------------------------------------- */
+typedef struct FIF_RESULT {
+    int            error;    /* FIF_OK or FIF_ERR_...                              */
+    int            modus;    /* requested modus                                    */
+    int            width;    /* decoded image width,  0 if not decoded             */
+    int            height;   /* decoded image height, 0 if not decoded             */
+    unsigned char *data;     /* modus 2: PNG bytes; modus 3: text; modus 1: NULL   */
+    size_t         size;     /* modus 2: PNG byte count; modus 3: text length      */
+    char          *text;     /* modus 3: NUL-terminated text, otherwise NULL       */
+} FIF_RESULT;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int ConvertLegacyFIFtoPNG(const char *fifPath, const char *pngPath);
+FIF_RESULT *ConvertLegacyFIFtoPNG(const char *fifPath, const char *pngPath, int modus);
 
 #ifdef __cplusplus
 }
 #endif
 
-#ifndef CONVERTLEGACYFIF_DECLARATION_ONLY
+#endif /* LIBFIFLEGACY_DECLARATIONS */
+
+#if !defined(LIBFIFLEGACY_DECLARATION_ONLY) && !defined(LIBFIFLEGACY_IMPLEMENTED)
+#define LIBFIFLEGACY_IMPLEMENTED
 /* ======================================================================
- * IMPLEMENTATION  (all helpers are static; only the function above is
- * exported)
+ * IMPLEMENTATION  (all helpers are static; only ConvertLegacyFIFtoPNG
+ * is exported)
  * ==================================================================== */
 /* ---- core: includes, utilities, bit reader ---- */
 #include <stdio.h>
@@ -128,6 +191,7 @@ int ConvertLegacyFIFtoPNG(const char *fifPath, const char *pngPath);
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdarg.h>
 
 #define FIFQ_MAXPIX (1L << 28)   /* largest supported canvas, in pixels */
 
@@ -135,6 +199,17 @@ typedef struct {
     int w, h;
     uint8_t *rgb;          /* w*h*3 */
 } fifq_image;
+
+typedef struct {           /* optional decoder statistics (information mode) */
+    long cells[2][8];      /* FTC: range cells per class; [0] luminance plane, [1] chroma plane */
+    long recs[2][8];       /* FTC: transmitted transform records per class */
+    int  sweeps;           /* FTC: largest number of half-resolution convergence sweeps */
+    int  regions;          /* FTC: regions decoded */
+    long f1_tr[3][5];      /* FIF1: transforms per component (Y,E1,E2) and level */
+    long f1_kind[3][3];    /* FIF1: transforms per component and domain kind 0x11/0x21/0x22 */
+    long f1_const[3];      /* FIF1: one-pixel constants per component */
+    int  f1_tiles;         /* FIF1: tiles decoded */
+} fifq_stats;
 
 static unsigned fifq_u16(const uint8_t *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static int fifq_s16(const uint8_t *p) { int v = (int)fifq_u16(p); return v >= 0x8000 ? v - 0x10000 : v; }
@@ -428,7 +503,7 @@ static int fifq_ftt_sample(const fifq_ftt *t, const fifq_rec *r, int rr, int cc)
 
 /* Reconstructs a packed canvas of W x PH from W/4 x PH/4 records.
  * full: output W*PH bytes. */
-static int fifq_ftc_reconstruct(const fifq_rec *rec, int W, int PH, const fifq_ftt *ftt, uint8_t *full) {
+static int fifq_ftc_reconstruct(const fifq_rec *rec, int W, int PH, const fifq_ftt *ftt, uint8_t *full, fifq_stats *st) {
     int bw = W / 4, bh = PH / 4, hw = W / 2, hh = PH / 2;
     size_t nnodes = (size_t)hw * hh, nrec = (size_t)bw * bh, t;
     uint8_t *half = (uint8_t *)malloc(nnodes);
@@ -516,6 +591,7 @@ static int fifq_ftc_reconstruct(const fifq_rec *rec, int W, int PH, const fifq_f
         }
         if (!any) break;
     }
+    if (st && (sweeps < 1000 ? sweeps + 1 : 1000) > st->sweeps) st->sweeps = sweeps < 1000 ? sweeps + 1 : 1000;
 
     /* --- full-resolution expansion --- */
     for (br = 0; br < bh; br++) for (bc = 0; bc < bw; bc++) {
@@ -755,7 +831,7 @@ static int fifq_read_external(fifq_bits *b, const fifq_rparams *P, fifq_rec *o) 
 /* Decodes one plane. rec: packed record array (W/4 columns). hw/hh: half canvas for bounds checks.
  * ext_allowed: number of FTT refs (0 = classes 4..6 invalid). */
 static int fifq_plane_decode(fifq_bits *b, const fifq_rparams *P, const fifq_plane *pl, int five_masks,
-                             int fin0, int ext_allowed, fifq_rec *rec, int hw, int hh) {
+                             int fin0, int ext_allowed, fifq_rec *rec, int hw, int hh, fifq_stats *st, int pidx) {
     int pbw = (pl->bw + 3) & ~3, pbh = (pl->bh + 3) & ~3;
     int nord = pbw * pbh, ntx = pbw / 4, o, n = 0, pass;
     int32_t *cell = (int32_t *)malloc(sizeof(int32_t) * (size_t)(nord ? nord : 1));
@@ -785,6 +861,7 @@ static int fifq_plane_decode(fifq_bits *b, const fifq_rparams *P, const fifq_pla
         if (cls[o] == 255) goto done;
         if (cls[o] >= 4 && !ext_allowed) goto done;
     }
+    if (st) for (o = 0; o < nord; o++) if (cell[o] >= 0) st->cells[pidx][cls[o] & 7]++;
     /* records: classes 2,1,0 then 6,5,4 */
     for (pass = 0; pass < 6; pass++) {
         static const int pcls[6] = {2, 1, 0, 6, 5, 4};
@@ -799,6 +876,7 @@ static int fifq_plane_decode(fifq_bits *b, const fifq_rparams *P, const fifq_pla
             else if (!fifq_read_ordinary(b, P, pl, &br)) goto done;
             br.cls = (uint8_t)c;
             br.set = 1;
+            if (st) st->recs[pidx][c]++;
             for (k = 0; k < gs; k++) {
                 fifq_rec d;
                 int sr, sc;
@@ -825,7 +903,7 @@ done:
 /* ======================================================================
  * PART I: fixed FTC 1.1
  * ==================================================================== */
-static int fifq_decode_fixed(const uint8_t *f, size_t len, fifq_image *img) {
+static int fifq_decode_fixed(const uint8_t *f, size_t len, fifq_image *img, fifq_stats *st) {
     int W, H, DS, i, ok = FIF_ERR_MALFORMED;
     uint32_t N;
     uint8_t canon[67];
@@ -873,15 +951,15 @@ static int fifq_decode_fixed(const uint8_t *f, size_t len, fifq_image *img) {
 
     pl.bw = W / 4; pl.bh = H / 4; pl.row0 = 0; pl.dstep = DS;
     pl.dcols = (W + DS - 1) / DS; pl.drows = (H + DS - 1) / DS;
-    if (!fifq_plane_decode(&b, &P, &pl, 0, 1, 0, rec, W / 2, 3 * H / 4)) goto done;
+    if (!fifq_plane_decode(&b, &P, &pl, 0, 1, 0, rec, W / 2, 3 * H / 4, st, 0)) goto done;
     while (b.pos & 7) if (fifq_get(&b, 1)) goto done;
     pl.bh = H / 8; pl.row0 = H / 4;
     pl.drows = (H + DS - 1) / DS + (H / 2 + DS - 1) / DS;
-    if (!fifq_plane_decode(&b, &P, &pl, 0, 1, 0, rec, W / 2, 3 * H / 4)) goto done;
+    if (!fifq_plane_decode(&b, &P, &pl, 0, 1, 0, rec, W / 2, 3 * H / 4, st, 1)) goto done;
     if (b.nbits - b.pos > 7) goto done;
     while (b.pos < b.nbits) if (fifq_get(&b, 1)) goto done;
 
-    if (!fifq_ftc_reconstruct(rec, W, 3 * H / 2, NULL, full)) { ok = FIF_ERR_MEMORY; goto done; }
+    if (!fifq_ftc_reconstruct(rec, W, 3 * H / 2, NULL, full, st)) { ok = FIF_ERR_MEMORY; goto done; }
     if (!fifq_ftc_filter(rec, W, 3 * H / 2, H / 4, 1, full)) { ok = FIF_ERR_MEMORY; goto done; }
     img->w = W; img->h = H;
     img->rgb = (uint8_t *)malloc((size_t)W * H * 3);
@@ -1105,30 +1183,30 @@ static int fifq_ftc3_header(const uint8_t *f, size_t len, fifq_ftc3 *h) {
     return 0;
 }
 
-static int fifq_ftc3_region_p1(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW, int RH, fifq_rec *rec, int ext_ok) {
+static int fifq_ftc3_region_p1(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW, int RH, fifq_rec *rec, int ext_ok, fifq_stats *st) {
     fifq_bits b;
     fifq_plane pl;
     int PH = h->color ? RH * 3 / 2 : RH;
     fifq_bits_init(&b, s, n);
     pl.bw = RW / 4; pl.bh = RH / 4; pl.row0 = 0; pl.dstep = 2;
     pl.dcols = (RW + 1) / 2; pl.drows = (RH + 1) / 2;
-    if (!fifq_plane_decode(&b, &h->P, &pl, 1, 0, ext_ok, rec, RW / 2, PH / 2)) return 0;
+    if (!fifq_plane_decode(&b, &h->P, &pl, 1, 0, ext_ok, rec, RW / 2, PH / 2, st, 0)) return 0;
     if (h->color) {
         while (b.pos & 7) if (fifq_get(&b, 1)) return 0;
         pl.bh = RH / 8; pl.row0 = RH / 4;
         pl.drows = (RH + 1) / 2 + (RH / 2 + 1) / 2;
-        if (!fifq_plane_decode(&b, &h->P, &pl, 1, 0, ext_ok, rec, RW / 2, PH / 2)) return 0;
+        if (!fifq_plane_decode(&b, &h->P, &pl, 1, 0, ext_ok, rec, RW / 2, PH / 2, st, 1)) return 0;
     }
     if (b.nbits - b.pos > 7) return 0;
     while (b.pos < b.nbits) if (fifq_get(&b, 1)) return 0;
     return 1;
 }
 
-static int fifq_ftc3_region_p2(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW, int RH, fifq_rec *rec);
+static int fifq_ftc3_region_p2(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW, int RH, fifq_rec *rec, fifq_stats *st);
 
 static uint8_t *fifq_load_ftt(const char *fifpath, const fifq_ftc3 *h, int *err);
 
-static int fifq_decode_ftc3(const uint8_t *f, size_t len, const char *path, fifq_image *img) {
+static int fifq_decode_ftc3(const uint8_t *f, size_t len, const char *path, fifq_image *img, fifq_stats *st) {
     fifq_ftc3 *h = (fifq_ftc3 *)calloc(1, sizeof(fifq_ftc3));
     int err = FIF_ERR_MALFORMED, i, CW = 0, CH = 0;
     uint8_t *canvas = NULL, *fttbuf = NULL;
@@ -1159,8 +1237,8 @@ static int fifq_decode_ftc3(const uint8_t *f, size_t len, const char *path, fifq
         rec = (fifq_rec *)calloc(nrec, sizeof(fifq_rec));
         full = (uint8_t *)malloc((size_t)RW * PH);
         if (!rec || !full) { free(rec); free(full); err = FIF_ERR_MEMORY; goto done; }
-        if (h->entropy == 1) ok = fifq_ftc3_region_p1(h, f + pos + 4, L, RW, RH, rec, h->nftt);
-        else ok = fifq_ftc3_region_p2(h, f + pos + 4, L, RW, RH, rec);
+        if (h->entropy == 1) ok = fifq_ftc3_region_p1(h, f + pos + 4, L, RW, RH, rec, h->nftt, st);
+        else ok = fifq_ftc3_region_p2(h, f + pos + 4, L, RW, RH, rec, st);
         if (ok < 0) { free(rec); free(full); err = FIF_ERR_UNSUPPORTED; goto done; }
         for (k = 0; ok && k < nrec; k++) { if (!rec[k].set) ok = 0; if (rec[k].ext) needext = 1; }
         if (ok && needext && !ftt.pix) {
@@ -1169,7 +1247,8 @@ static int fifq_decode_ftc3(const uint8_t *f, size_t len, const char *path, fifq
             if (!fttbuf) { free(rec); free(full); err = e2; goto done; }
             ftt.pix = fttbuf + 26; ftt.w = (int)h->ftt_w; ftt.h = (int)h->ftt_h;
         }
-        if (ok) ok = fifq_ftc_reconstruct(rec, RW, PH, &ftt, full) && fifq_ftc_filter(rec, RW, PH, RH / 4, h->color, full);
+        if (ok) ok = fifq_ftc_reconstruct(rec, RW, PH, &ftt, full, st) && fifq_ftc_filter(rec, RW, PH, RH / 4, h->color, full);
+        if (ok && st) st->regions++;
         if (ok) {
             for (y = 0; y < RH; y++) memcpy(canvas + (size_t)(h->ry[i] + y) * CW + h->rx[i], full + (size_t)y * RW, (size_t)RW);
             if (h->color) for (y = 0; y < RH / 2; y++) for (x = 0; x < RW / 2; x++) {
@@ -1340,7 +1419,7 @@ static int fifq_rc_model(fifq_rc *r, int C, uint32_t *cum) {
 }
 
 /* one plane of the arithmetic profile */
-static int fifq_p2_plane(fifq_rc *r, fifq_ftc3 *h, const fifq_plane *pl, fifq_rec *rec, int hw, int hh) {
+static int fifq_p2_plane(fifq_rc *r, fifq_ftc3 *h, const fifq_plane *pl, fifq_rec *rec, int hw, int hh, fifq_stats *st, int pidx) {
     int pbw = (pl->bw + 3) & ~3, pbh = (pl->bh + 3) & ~3;
     int nord = pbw * pbh, ntx = pbw / 4, ntiles = nord / 16, o, t, ngroups = 0, ok = 0, flag, f, g;
     int32_t *cell = (int32_t *)malloc(sizeof(int32_t) * (size_t)(nord ? nord : 1));
@@ -1375,13 +1454,14 @@ static int fifq_p2_plane(fifq_rc *r, fifq_ftc3 *h, const fifq_plane *pl, fifq_re
         }
     }
     if (r->err) goto done;
+    if (st) for (o = 0; o < nord; o++) if (cell[o] >= 0) st->cells[pidx][cls[o] & 7]++;
     /* groups: class 2 (tiles), class 1 (quads), class 0 (cells) */
     for (g = 2; g >= 0; g--) {
         int gs = g == 2 ? 16 : (g == 1 ? 4 : 1), b2;
         for (b2 = 0; b2 < nord; b2 += gs) {
             int k, any = 0;
             for (k = 0; k < gs; k++) if (cell[b2 + k] >= 0 && cls[b2 + k] == g) { any = 1; break; }
-            if (any) { gbase[ngroups] = b2; gsize[ngroups] = (uint8_t)g; ngroups++; }
+            if (any) { gbase[ngroups] = b2; gsize[ngroups] = (uint8_t)g; ngroups++; if (st) st->recs[pidx][g]++; }
         }
     }
     for (f = 0; f < 6; f++) {
@@ -1445,7 +1525,7 @@ done:
     return ok;
 }
 
-static int fifq_ftc3_region_p2(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW, int RH, fifq_rec *rec) {
+static int fifq_ftc3_region_p2(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW, int RH, fifq_rec *rec, fifq_stats *st) {
     fifq_rc r;
     fifq_plane pl;
     int PH = h->color ? RH * 3 / 2 : RH, res;
@@ -1455,12 +1535,12 @@ static int fifq_ftc3_region_p2(fifq_ftc3 *h, const uint8_t *s, size_t n, int RW,
     fifq_rc_init(&r, s, n);
     pl.bw = RW / 4; pl.bh = RH / 4; pl.row0 = 0; pl.dstep = 2;
     pl.dcols = (RW + 1) / 2; pl.drows = (RH + 1) / 2;
-    res = fifq_p2_plane(&r, h, &pl, rec, RW / 2, PH / 2);
+    res = fifq_p2_plane(&r, h, &pl, rec, RW / 2, PH / 2, st, 0);
     if (res != 1) return res;
     if (h->color) {
         pl.bh = RH / 8; pl.row0 = RH / 4;
         pl.drows = (RH + 1) / 2 + (RH / 2 + 1) / 2;
-        res = fifq_p2_plane(&r, h, &pl, rec, RW / 2, PH / 2);
+        res = fifq_p2_plane(&r, h, &pl, rec, RW / 2, PH / 2, st, 1);
         if (res != 1) return res;
     }
     if (r.err || r.p > n || n - r.p > 3) return 0;
@@ -1987,7 +2067,7 @@ typedef struct {
 
 /* decode one component of one tile: returns 1 ok, 0 malformed, -1 memory */
 static int fifq_f1_component(const fifq_f1 *h, fifq_bits *rd, int comp, int tw, int th,
-                             fifq_plist *out, uint32_t *ntrans) {
+                             fifq_plist *out, uint32_t *ntrans, fifq_stats *st) {
     int cols = tw / 16, rows = th / 16, n = cols * rows, i, lvl, finallvl = comp ? 3 : 4;
     int div = comp ? 2 : 1;
     fifq_node *par = (fifq_node *)malloc(sizeof(fifq_node) * (size_t)n), *chl = NULL;
@@ -2073,6 +2153,7 @@ static int fifq_f1_component(const fifq_f1 *h, fifq_bits *rd, int comp, int tw, 
                                 r.s = 8;
                             }
                             if (!fifq_pl_add(out, &r)) { free(as); ok = -1; goto done; }
+                            if (st) { st->f1_tr[comp][lvl]++; st->f1_kind[comp][m->kind == 0x11 ? 0 : (m->kind == 0x21 ? 1 : 2)]++; }
                             continue;
                         }
                         t = &out->t[idx++];
@@ -2098,6 +2179,7 @@ static int fifq_f1_component(const fifq_f1 *h, fifq_bits *rd, int comp, int tw, 
         par = chl; chl = NULL; n = nch;
         if (lvl == finallvl) break;
     }
+    if (st) st->f1_const[comp] += n;
     for (i = 0; i < n; i++)                    /* remaining children: one-pixel constants */
         if (!fifq_pl_const(out, par[i].x / div, par[i].y / div, par[i].v)) { ok = -1; goto done; }
     ok = 1;
@@ -2309,7 +2391,7 @@ out:
     return ok;
 }
 
-static int fifq_decode_fif1(const uint8_t *f, size_t len, fifq_image *img) {
+static int fifq_decode_fif1(const uint8_t *f, size_t len, fifq_image *img, fifq_stats *st) {
     static const int nib[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 128};
     fifq_f1 h;
     uint32_t ow, oh, glob[5], *toff = NULL;
@@ -2346,40 +2428,40 @@ static int fifq_decode_fif1(const uint8_t *f, size_t len, fifq_image *img) {
         while (p < hs) {
             unsigned type, clen;
             const uint8_t *c;
-            if (hs - p < 3) return FIF_ERR_MALFORMED;
+            if (hs - p < 3) { err = FIF_ERR_MALFORMED; goto done; }
             type = f[p]; clen = fifq_u16(f + p + 1); c = f + p + 3;
-            if (clen > hs - p - 3) return FIF_ERR_MALFORMED;
+            if (clen > hs - p - 3) { err = FIF_ERR_MALFORMED; goto done; }
             while (k < 4 && order4[k] != type) k++;   /* canonical order, no duplicates */
-            if (k == 4) return FIF_ERR_MALFORMED;
+            if (k == 4) { err = FIF_ERR_MALFORMED; goto done; }
             k++;
             seen++;
             if (type == 0xC0) {
-                if (clen != 2) return FIF_ERR_MALFORMED;  /* vendor value (2/4/5 seen); no decode action */
+                if (clen != 2) { err = FIF_ERR_MALFORMED; goto done; }  /* vendor value (2/4/5 seen); no decode action */
                 have_c0 = 1;
             } else if (type == 0x31) {
                 unsigned cnt, wsum, k2; size_t bits, bytes, bp;
-                if (!h.color || clen < 5) return FIF_ERR_MALFORMED;
+                if (!h.color || clen < 5) { err = FIF_ERR_MALFORMED; goto done; }
                 cnt = fifq_u16(c);
-                for (k2 = 0; k2 < 3; k2++) if (c[2 + k2] < 1 || c[2 + k2] > 8) return FIF_ERR_MALFORMED;
+                for (k2 = 0; k2 < 3; k2++) if (c[2 + k2] < 1 || c[2 + k2] > 8) { err = FIF_ERR_MALFORMED; goto done; }
                 wsum = (unsigned)c[2] + c[3] + c[4];
                 bits = (size_t)cnt * wsum; bytes = (bits + 7) / 8;
-                if (clen != 5 + bytes) return FIF_ERR_MALFORMED;
-                for (bp = bits; bp < bytes * 8; bp++) if ((c[5 + bp / 8] >> (bp % 8)) & 1) return FIF_ERR_MALFORMED;
+                if (clen != 5 + bytes) { err = FIF_ERR_MALFORMED; goto done; }
+                for (bp = bits; bp < bytes * 8; bp++) if ((c[5 + bp / 8] >> (bp % 8)) & 1) { err = FIF_ERR_MALFORMED; goto done; }
             } else if (type == 0xFF) {
                 static const uint8_t ftu[8] = {'F', 'T', 'U', 0, 1, 1, 8, 0};
-                if (clen != 16 || memcmp(c, ftu, 8) || fifq_u32(c + 8) != ow || fifq_u32(c + 12) != oh) return FIF_ERR_MALFORMED;
+                if (clen != 16 || memcmp(c, ftu, 8) || fifq_u32(c + 8) != ow || fifq_u32(c + 12) != oh) { err = FIF_ERR_MALFORMED; goto done; }
                 have_ff = 1;
             } else {
-                if (clen != (1 + T) * 20 || have_dir) return FIF_ERR_MALFORMED;
+                if (clen != (1 + T) * 20 || have_dir) { err = FIF_ERR_MALFORMED; goto done; }
                 toff = (uint32_t *)malloc(sizeof(uint32_t) * 5 * T);
-                if (!toff) return FIF_ERR_MEMORY;
+                if (!toff) { err = FIF_ERR_MEMORY; goto done; }
                 for (l = 0; l < 5; l++) glob[l] = fifq_u32(c + 4 * l);
                 for (l = 0; l < 5 * T; l++) toff[l] = fifq_u32(c + 20 + 4 * l);
                 have_dir = 1;
             }
             p += 3 + clen;
         }
-        if (p != hs || !have_dir || !have_c0 || !have_ff || seen != nch) { free(toff); return FIF_ERR_MALFORMED; }
+        if (p != hs || !have_dir || !have_c0 || !have_ff || seen != nch) goto done;
     }
     /* directory validation */
     for (l = 0; l < 5; l++) {
@@ -2430,7 +2512,7 @@ static int fifq_decode_fif1(const uint8_t *f, size_t len, fifq_image *img) {
             size_t ds = (size_t)h.W;
             uint32_t nt = 0;
             L.nt = 0; L.nc = 0;
-            r = fifq_f1_component(&h, rd, comp, tw, th, &L, &nt);
+            r = fifq_f1_component(&h, rd, comp, tw, th, &L, &nt, st);
             if (r < 0) { err = FIF_ERR_MEMORY; goto done; }
             if (!r) goto done;
             if (comp == 0) ny = nt;
@@ -2443,6 +2525,7 @@ static int fifq_decode_fif1(const uint8_t *f, size_t len, fifq_image *img) {
             if (!r) goto done;
         }
     }
+    if (st) st->f1_tiles = (int)T;
     img->w = (int)ow; img->h = (int)oh;
     img->rgb = (uint8_t *)malloc((size_t)ow * oh * 3);
     if (!img->rgb) { err = FIF_ERR_MEMORY; goto done; }
@@ -2452,6 +2535,465 @@ done:
     free(toff); free(canvas);
     free(L.t); free(L.cv); free(L.cx); free(L.cy);
     return err;
+}
+
+
+/* ======================================================================
+ * Information text (modus 3)
+ * ==================================================================== */
+static void fifq_tnum(fifq_buf *b, unsigned long u, int neg, unsigned base, int upper, int width, int zero) {
+    char tmp[48];
+    int n = 0;
+    const char *dg = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    do { tmp[n++] = dg[u % base]; u /= base; } while (u && n < 40);
+    if (neg) {
+        if (zero) { fifq_buf_byte(b, '-'); width--; }
+        else tmp[n++] = '-';
+    }
+    for (; width > n; width--) fifq_buf_byte(b, zero ? '0' : ' ');
+    while (n) fifq_buf_byte(b, (unsigned char)tmp[--n]);
+}
+
+/* minimal printf: %s %c %d %u %x %X %%, optional 0-flag, width and 'l' */
+static void fifq_tp(fifq_buf *b, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    while (*fmt) {
+        int zero = 0, width = 0, lng = 0;
+        if (*fmt != '%') { fifq_buf_byte(b, (unsigned char)*fmt++); continue; }
+        fmt++;
+        if (*fmt == '0') { zero = 1; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
+        if (*fmt == 'l') { lng = 1; fmt++; }
+        switch (*fmt) {
+        case 's': {
+            const char *str = va_arg(ap, const char *);
+            if (!str) str = "";
+            fifq_buf_put(b, str, strlen(str));
+            break;
+        }
+        case 'c': fifq_buf_byte(b, (unsigned)va_arg(ap, int)); break;
+        case 'd': {
+            long v = lng ? va_arg(ap, long) : (long)va_arg(ap, int);
+            fifq_tnum(b, v < 0 ? 0UL - (unsigned long)v : (unsigned long)v, v < 0, 10, 0, width, zero);
+            break;
+        }
+        case 'u': case 'x': case 'X': {
+            unsigned long u = lng ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned);
+            fifq_tnum(b, u, 0, *fmt == 'u' ? 10u : 16u, *fmt == 'X', width, zero);
+            break;
+        }
+        case '%': fifq_buf_byte(b, '%'); break;
+        case 0: va_end(ap); return;
+        default: fifq_buf_byte(b, (unsigned char)*fmt); break;
+        }
+        fmt++;
+    }
+    va_end(ap);
+}
+
+static void fifq_thex(fifq_buf *t, const uint8_t *p, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) fifq_tp(t, i ? " %02X" : "%02X", p[i]);
+}
+static void fifq_tstr(fifq_buf *t, const uint8_t *p, size_t n) {   /* printable ASCII up to NUL */
+    size_t i;
+    for (i = 0; i < n && p[i]; i++) fifq_buf_byte(t, (p[i] >= 0x20 && p[i] < 0x7F) ? p[i] : '?');
+}
+static void fifq_tfix(fifq_buf *t, unsigned long num, unsigned long den, int dec) {  /* num/den with dec decimals */
+    unsigned long sc = 1, ip, fr;
+    int i;
+    if (!den) { fifq_tp(t, "-"); return; }
+    for (i = 0; i < dec; i++) sc *= 10;
+    ip = num / den;
+    fr = (unsigned long)(((num % den) * (unsigned long)sc * 2 + den) / (2 * den));
+    if (fr >= sc) { ip++; fr -= sc; }
+    fifq_tp(t, "%lu", ip);
+    if (dec) { fifq_tp(t, "."); fifq_tnum(t, fr, 0, 10, 0, dec, 1); }
+}
+
+static const char *fifq_errtext(int rc) {
+    switch (rc) {
+    case FIF_OK: return "OK";
+    case FIF_ERR_ARGUMENT: return "invalid argument (fifPath empty, or pngPath missing in modus 1)";
+    case FIF_ERR_EXTENSION: return "file name must end in .fif";
+    case FIF_ERR_OPEN: return "input file cannot be opened or read";
+    case FIF_ERR_UNKNOWN_FORMAT: return "unknown format (no FTC/FIF1 signature)";
+    case FIF_ERR_VIDEO: return "fractal video file, video is not converted";
+    case FIF_ERR_UNSUPPORTED: return "unsupported variant of the format";
+    case FIF_ERR_MALFORMED: return "file is damaged or inconsistent";
+    case FIF_ERR_FTT_MISSING: return "required external .ftt template not found";
+    case FIF_ERR_MEMORY: return "out of memory";
+    case FIF_ERR_TOO_LARGE: return "file or image too large";
+    case FIF_ERR_WRITE: return "PNG file cannot be written";
+    case FIF_ERR_MODE: return "invalid modus (allowed: 1, 2, 3)";
+    default: return "unknown error";
+    }
+}
+
+static void fifq_info_fixed(fifq_buf *t, const uint8_t *f, size_t len) {
+    unsigned W, H, DS;
+    uint32_t N;
+    fifq_tp(t, "Format: FTC fixed still-image profile 1.1 (Part I)\n");
+    if (len < 67) { fifq_tp(t, "Header: truncated (%lu of 67 bytes)\n", (unsigned long)len); return; }
+    W = fifq_u16(f + 8); H = fifq_u16(f + 10); DS = fifq_u16(f + 0x30); N = fifq_u32(f + 0x14);
+    fifq_tp(t, "Signature: FTC\\0\n");
+    fifq_tp(t, "Outer version: %u.%u\n", f[4], f[5]);
+    fifq_tp(t, "Profile generation: %u.%u\n", f[6], f[7]);
+    fifq_tp(t, "Width: %u\n", W);
+    fifq_tp(t, "Height: %u\n", H);
+    fifq_tp(t, "Output depth: %u bits per pixel\n", fifq_u16(f + 12));
+    fifq_tp(t, "Color model: YUV 4:2:0 (Y full resolution, U and V half resolution)\n");
+    fifq_tp(t, "Image/profile selector: %u\n", fifq_u16(f + 14));
+    fifq_tp(t, "Header length: %lu bytes\n", (unsigned long)fifq_u32(f + 16));
+    fifq_tp(t, "Payload length: %lu bytes\n", (unsigned long)N);
+    fifq_tp(t, "Expected file size: %lu bytes\n", 67UL + (unsigned long)N);
+    fifq_tp(t, "Auxiliary section length: %lu bytes\n", (unsigned long)fifq_u32(f + 0x18));
+    fifq_tp(t, "Transform stream version: %u.%u\n", f[0x1C], f[0x1D]);
+    fifq_tp(t, "Reconstruction depth constant: %u\n", fifq_u16(f + 0x1E));
+    fifq_tp(t, "Canvas origin: %u,%u\n", fifq_u16(f + 0x20), fifq_u16(f + 0x22));
+    fifq_tp(t, "Transform canvas: %u x %u\n", fifq_u16(f + 0x24), fifq_u16(f + 0x26));
+    fifq_tp(t, "Variable extension length: %u bytes\n", fifq_u16(f + 0x28));
+    fifq_tp(t, "Region section length: %u bytes (0 = one implicit full-canvas region)\n", fifq_u16(f + 0x2A));
+    fifq_tp(t, "Range block size: %u x %u pixels\n", fifq_u16(f + 0x2C), fifq_u16(f + 0x2E));
+    fifq_tp(t, "Domain grid step: %u pixels\n", DS);
+    fifq_tp(t, "Domain step companion flag: %u\n", f[0x3D]);
+    fifq_tp(t, "Symmetry index bits: %u\n", f[0x32]);
+    fifq_tp(t, "Quantization index bits: %u\n", f[0x33]);
+    fifq_tp(t, "Quantizer step code: %u (internal step %u)\n", f[0x34], 8u * f[0x34]);
+    fifq_tp(t, "Quantizer origin code: %d\n", fifq_s16(f + 0x35));
+    fifq_tp(t, "Transform definitions: %u (type %u, component precision %u bits)\n",
+            fifq_u16(f + 0x37), fifq_u16(f + 0x39), fifq_u16(f + 0x3B));
+    fifq_tp(t, "Contrast factor: 6/8 = 0.750\n");
+    if (W && H && DS) {
+        fifq_tp(t, "Luminance range block grid: %u x %u\n", W / 4, H / 4);
+        fifq_tp(t, "Chroma range block grid: %u x %u (U and V side by side)\n", W / 4, H / 8);
+        fifq_tp(t, "Luminance domain grid: %u x %u\n", (W + DS - 1) / DS, (H + DS - 1) / DS);
+        fifq_tp(t, "Chroma domain grid: %u x %u (luminance rows included)\n", (W + DS - 1) / DS,
+                (H + DS - 1) / DS + (H / 2 + DS - 1) / DS);
+    }
+}
+
+static void fifq_info_wave(fifq_buf *t, const uint8_t *w, size_t n) {
+    size_t p = 12;
+    unsigned ch = 0, bits = 0;
+    uint32_t rate = 0, brate = 0, dbytes = 0;
+    if (n < 12 || memcmp(w, "RIFF", 4) || memcmp(w + 8, "WAVE", 4)) { fifq_tp(t, "Sound: no valid RIFF/WAVE data\n"); return; }
+    while (p + 8 <= n) {
+        uint32_t sz = fifq_u32(w + p + 4);
+        if (!memcmp(w + p, "fmt ", 4) && sz >= 16 && p + 8 + 16 <= n) {
+            ch = fifq_u16(w + p + 10); rate = fifq_u32(w + p + 12); brate = fifq_u32(w + p + 16); bits = fifq_u16(w + p + 22);
+        } else if (!memcmp(w + p, "data", 4)) dbytes = sz;
+        if (sz > n - p - 8) break;
+        p += 8 + sz + (sz & 1);
+    }
+    fifq_tp(t, "Sound format: PCM RIFF/WAVE, %lu bytes\n", (unsigned long)n);
+    fifq_tp(t, "Sound channels: %u\n", ch);
+    fifq_tp(t, "Sound sample rate: %lu Hz\n", (unsigned long)rate);
+    fifq_tp(t, "Sound bits per sample: %u\n", bits);
+    fifq_tp(t, "Sound data: %lu bytes\n", (unsigned long)dbytes);
+    if (brate) { fifq_tp(t, "Sound duration: "); fifq_tfix(t, dbytes, brate, 2); fifq_tp(t, " s\n"); }
+}
+
+static void fifq_info_ftc3(fifq_buf *t, const uint8_t *f, size_t len) {
+    unsigned color, main_size, aux, E, rsize, p, i, nreg, nftt, minor, nq = 0, q;
+    uint32_t payload, second;
+    unsigned long cw = 0, chh = 0;
+    fifq_tp(t, "Format: FTC region profile (Part II)\n");
+    if (len < 48) { fifq_tp(t, "Header: truncated (%lu of 48 bytes)\n", (unsigned long)len); return; }
+    color = fifq_u16(f + 6); main_size = fifq_u16(f + 16); aux = fifq_u16(f + 18);
+    payload = fifq_u32(f + 20); second = fifq_u32(f + 24); minor = f[29];
+    fifq_tp(t, "Signature: FTC\\0\n");
+    fifq_tp(t, "Outer encoder generation: %u\n", f[4]);
+    fifq_tp(t, "Outer family: %u\n", f[5]);
+    fifq_tp(t, "Color code: 0x%04X (%s)\n", color, color == 0x0101 ? "grayscale" : color == 0x0102 ? "YUV 4:2:0" :
+            color == 0x0104 ? "EUV 4:2:0" : "unknown");
+    fifq_tp(t, "Output depth: %u bits per pixel\n", fifq_u16(f + 12));
+    fifq_tp(t, "Entropy profile: %u (%s)\n", fifq_u16(f + 14), fifq_u16(f + 14) == 1 ? "bit/RLE masks" :
+            fifq_u16(f + 14) == 2 ? "arithmetic range coder" : "unknown");
+    fifq_tp(t, "Encoder information bytes: "); fifq_thex(t, f + 8, 4); fifq_tp(t, "\n");
+    fifq_tp(t, "Main header size: %u bytes\n", main_size);
+    fifq_tp(t, "Auxiliary (palette) size: %u bytes\n", aux);
+    fifq_tp(t, "Payload size: %lu bytes\n", (unsigned long)payload);
+    fifq_tp(t, "Secondary size: %lu bytes (%s)\n", (unsigned long)second, !second ? "none" :
+            f[4] <= 2 ? "encoder stamp" : "associated sound");
+    fifq_tp(t, "Transform version: %u.%u\n", f[28], minor);
+    fifq_tp(t, "Transform header length: %u bytes\n", fifq_u16(f + 30));
+    fifq_tp(t, "Output origin: %u,%u\n", fifq_u16(f + 32), fifq_u16(f + 34));
+    fifq_tp(t, "Width: %u\n", fifq_u16(f + 36));
+    fifq_tp(t, "Height: %u\n", fifq_u16(f + 38));
+    fifq_tp(t, "Stored size: %u x %u\n", fifq_u16(f + 40), fifq_u16(f + 42));
+    E = fifq_u16(f + 44);
+    fifq_tp(t, "Header extension bytes: %u\n", E);
+    p = 46 + E;
+    if (p + 2 > len) return;
+    rsize = fifq_u16(f + p); p += 2;
+    fifq_tp(t, "Region directory size: %u bytes\n", rsize);
+    if (p + 14 > len) return;
+    fifq_tp(t, "Encoder target/budget: %lu\n", (unsigned long)fifq_u32(f + p));
+    fifq_tp(t, "Encoder plane/layout code: %lu\n", (unsigned long)fifq_u32(f + p + 4));
+    if (f[p + 13]) {
+        nreg = f[p + 13];
+        fifq_tp(t, "Encoder workspace limit: %lu\n", (unsigned long)fifq_u32(f + p + 9));
+    } else {
+        nreg = (unsigned)fifq_u32(f + p + 9);
+        fifq_tp(t, "Region count escape: 32-bit count used\n");
+    }
+    fifq_tp(t, "Region count: %u\n", nreg);
+    for (i = 0; i < nreg && i < 4096 && p + 14 + 8 * i + 8 <= len; i++) {
+        const uint8_t *r = f + p + 14 + 8 * i;
+        unsigned long x1 = fifq_u16(r) + (unsigned long)fifq_u16(r + 4), y1 = fifq_u16(r + 2) + (unsigned long)fifq_u16(r + 6);
+        fifq_tp(t, "Region %u rectangle: x=%u y=%u width=%u height=%u\n", i + 1, fifq_u16(r), fifq_u16(r + 2), fifq_u16(r + 4), fifq_u16(r + 6));
+        if (x1 > cw) cw = x1;
+        if (y1 > chh) chh = y1;
+    }
+    fifq_tp(t, "Coded canvas: %lu x %lu\n", cw, chh);
+    q = p + 14 + 8 * (nreg < 4096 ? nreg : 4096);
+    if (q < len) {
+        nftt = f[q++];
+        fifq_tp(t, "External FTT references: %u\n", nftt);
+        for (i = 0; i < nftt && q + 9 <= len; i++) {
+            unsigned L = f[q + 8];
+            fifq_tp(t, "FTT reference %u: size %u x %u, identity 0x%08lX, file \"", i + 1, fifq_u16(f + q), fifq_u16(f + q + 2),
+                    (unsigned long)fifq_u32(f + q + 4));
+            if (q + 9 + L <= len) fifq_tstr(t, f + q + 9, L);
+            fifq_tp(t, "\"\n");
+            q += 9 + L;
+        }
+    }
+    p += rsize;
+    if (p + 7 > len) return;
+    fifq_tp(t, "Range block size: %u pixels\n", fifq_u16(f + p));
+    fifq_tp(t, "Domain sample size: %u\n", fifq_u16(f + p + 2));
+    fifq_tp(t, "Domain grid step: %u pixels\n", fifq_u16(f + p + 4));
+    fifq_tp(t, "Symmetry bits: %u\n", f[p + 6]);
+    p += 7;
+    if (minor == 1) {
+        if (p + 6 > len) return;
+        nq = fifq_u16(f + p + 4);
+        fifq_tp(t, "Quantizer count: %u\n", nq);
+        for (i = 0; i < nq && i < 2 && p + 6 + 2 * i + 2 <= len; i++) {
+            unsigned kind = fifq_u16(f + p + 6 + 2 * i);
+            fifq_tp(t, "Quantizer %u: kind %u (contrast %u/8), bits %u, step %u, base %d\n", i + 1, kind, kind, f[p], f[p + 1], fifq_s16(f + p + 2));
+        }
+        p += 6 + 2 * nq;
+    } else {
+        if (p + 2 > len) return;
+        nq = fifq_u16(f + p);
+        fifq_tp(t, "Quantizer count: %u\n", nq);
+        for (i = 0; i < nq && i < 2 && p + 2 + 6 * i + 6 <= len; i++) {
+            const uint8_t *e = f + p + 2 + 6 * i;
+            fifq_tp(t, "Quantizer %u: kind %u (contrast %u/8), bits %u, step %u, base %d\n", i + 1, fifq_u16(e), fifq_u16(e), e[2], e[3], fifq_s16(e + 4));
+        }
+        p += 2 + 6 * nq;
+    }
+    if (p + 13 > len) return;
+    fifq_tp(t, "External transform kind: %u\n", fifq_u16(f + p));
+    fifq_tp(t, "External transform tuning value: %u\n", fifq_u16(f + p + 2));
+    fifq_tp(t, "FTT domain step: %u\n", fifq_u16(f + p + 6));
+    fifq_tp(t, "FTT symmetry bits: %u\n", f[p + 8]);
+    fifq_tp(t, "FTT offset bits: %u, step %u, base %d\n", f[p + 9], f[p + 10], fifq_s16(f + p + 11));
+    p += 13;
+    if (minor == 3 && p < len) {
+        unsigned nd = f[p++];
+        fifq_tp(t, "Quantizer side deltas: %u (", nd);
+        for (i = 0; i < nd && p + i < len; i++) fifq_tp(t, i ? ", %d" : "%d", (int)(signed char)f[p + i]);
+        fifq_tp(t, ")\n");
+        p += nd;
+        if (p + 4 <= len) { fifq_tp(t, "Encoder statistic bytes: "); fifq_thex(t, f + p, 4); fifq_tp(t, "\n"); }
+    } else if (nq == 2 && p + 5 <= len) {
+        fifq_tp(t, "Encoder statistic bytes: "); fifq_thex(t, f + p, 5); fifq_tp(t, "\n");
+    }
+    if (aux >= 2 && (size_t)main_size + 2 <= len)
+        fifq_tp(t, "Palette: %u RGB entries (output colormap, not applied to truecolor output)\n", fifq_u16(f + main_size));
+    else fifq_tp(t, "Palette: none\n");
+    {
+        size_t pos = (size_t)main_size + aux, end = pos + payload;
+        for (i = 0; i < nreg && i < 4096 && pos + 4 <= len && pos + 4 <= end; i++) {
+            uint32_t L = fifq_u32(f + pos);
+            fifq_tp(t, "Region %u stream: %lu bytes at offset %lu\n", i + 1, (unsigned long)L, (unsigned long)pos + 4);
+            if (L > len - pos - 4) break;
+            pos += 4 + L;
+        }
+        if (second && end <= len) {
+            if (f[4] <= 2) {
+                fifq_tp(t, "Encoder stamp: \"");
+                fifq_tstr(t, f + end, len - end < second ? len - end : second);
+                fifq_tp(t, "\"\n");
+            } else if (end + 106 <= len) {
+                fifq_tp(t, "Attachment descriptor: \"");
+                fifq_tstr(t, f + end + 6, 32);
+                fifq_tp(t, "\"\n");
+                fifq_info_wave(t, f + end + 106, len - end - 106 < second ? len - end - 106 : second);
+            }
+        }
+    }
+}
+
+static void fifq_info_fif1(fifq_buf *t, const uint8_t *f, size_t len) {
+    static const int nib[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 128};
+    unsigned hs, W, H, TW, TH, C = 0, R = 0, p, i, l;
+    uint32_t glob[5] = {0, 0, 0, 0, 0};
+    const uint8_t *dir = NULL;
+    unsigned long T = 0;
+    fifq_tp(t, "Format: FIF1 progressive fractal image (Part III)\n");
+    if (len < 56) { fifq_tp(t, "Header: truncated (%lu of 56 bytes)\n", (unsigned long)len); return; }
+    hs = fifq_u16(f + 14); W = fifq_u16(f + 30); H = fifq_u16(f + 32); TW = fifq_u16(f + 38); TH = fifq_u16(f + 40);
+    fifq_tp(t, "Signature: FIF\\x01\n");
+    fifq_tp(t, "Container marker: %02X %02X\n", f[4], f[5]);
+    fifq_tp(t, "Width: %lu\n", (unsigned long)fifq_u32(f + 6));
+    fifq_tp(t, "Height: %lu\n", (unsigned long)fifq_u32(f + 10));
+    fifq_tp(t, "Header size: %u bytes\n", hs);
+    fifq_tp(t, "Declared file size: %lu bytes\n", (unsigned long)fifq_u32(f + 16));
+    fifq_tp(t, "Source components: %s\n", !memcmp(f + 20, "EUV\0", 4) ? "EUV (color: luminance + 2 chroma planes at half resolution)" :
+            !memcmp(f + 20, "Y\0\0\0", 4) ? "Y (grayscale)" : "unknown");
+    fifq_tp(t, "Output representation: %s\n", !memcmp(f + 24, "BGR\0", 4) ? "BGR" : !memcmp(f + 24, "Y\0\0\0", 4) ? "Y" : "unknown");
+    fifq_tp(t, "Scale: %u\n", fifq_u16(f + 28));
+    fifq_tp(t, "Coded canvas: %u x %u\n", W, H);
+    fifq_tp(t, "Luminance domain step: %u\n", f[34]);
+    fifq_tp(t, "Chroma domain step: %u\n", f[35]);
+    fifq_tp(t, "Initial range exponent: %u (ranges of %u x %u pixels)\n", f[36], f[36] < 16 ? 1u << f[36] : 0u, f[36] < 16 ? 1u << f[36] : 0u);
+    fifq_tp(t, "Progressive levels: %u\n", f[37]);
+    fifq_tp(t, "Tile size: %u x %u\n", TW, TH);
+    if (TW && TH) {
+        C = (W + TW - 1) / TW; R = (H + TH - 1) / TH; T = (unsigned long)C * R;
+        fifq_tp(t, "Tile grid: %u x %u (%lu tiles)\n", C, R, T);
+    }
+    fifq_tp(t, "Primary transform limit: %lu\n", (unsigned long)fifq_u32(f + 42));
+    fifq_tp(t, "Aggregate transform limit: %lu\n", (unsigned long)fifq_u32(f + 46));
+    fifq_tp(t, "Progressive codec: 0x%02X\n", f[50]);
+    fifq_tp(t, "Chunk count: %u\n", f[51]);
+    fifq_tp(t, "Encoder quality: %u %%\n", f[55]);
+    p = 56;
+    while (p + 3 <= hs && p + 3 <= len) {
+        unsigned type = f[p], clen = fifq_u16(f + p + 1);
+        const uint8_t *c = f + p + 3;
+        if (p + 3 + clen > len) { fifq_tp(t, "Chunk %02X: truncated\n", type); break; }
+        if (type == 0xC0 && clen >= 2) fifq_tp(t, "Chunk C0 (vendor extension): value %u\n", fifq_u16(c));
+        else if (type == 0x31 && clen >= 5)
+            fifq_tp(t, "Chunk 31 (display palette): %u entries, component widths %u/%u/%u bits\n", fifq_u16(c), c[2], c[3], c[4]);
+        else if (type == 0xFF && clen >= 16)
+            fifq_tp(t, "Chunk FF (FTU output size): %lu x %lu\n", (unsigned long)fifq_u32(c + 8), (unsigned long)fifq_u32(c + 12));
+        else if (type == 0x03) {
+            fifq_tp(t, "Chunk 03 (offset directory): %u bytes\n", clen);
+            if (T && clen == (1 + T) * 20) {
+                dir = c;
+                for (l = 0; l < 5; l++) glob[l] = fifq_u32(c + 4 * l);
+            }
+        } else fifq_tp(t, "Chunk %02X: %u bytes (unknown)\n", type, clen);
+        p += 3 + clen;
+    }
+    if (!dir) return;
+    for (l = 0; l < 5; l++) {
+        unsigned long k;
+        fifq_tp(t, "Level %u global offset: %lu\n", l, (unsigned long)glob[l]);
+        fifq_tp(t, "Level %u tile offsets:", l);
+        for (k = 0; k < T && k < 64; k++) fifq_tp(t, k ? ", %lu" : " %lu", (unsigned long)fifq_u32(dir + 20 + 4 * (l * T + k)));
+        if (T > 64) fifq_tp(t, ", ...");
+        fifq_tp(t, "\n");
+    }
+    for (l = 1; l < 5; l++) {
+        uint32_t bound = (uint32_t)len, k;
+        fifq_bits b;
+        unsigned nm;
+        if (glob[l] >= len) continue;
+        for (k = 0; k < 5; k++) if (glob[k] > glob[l] && glob[k] < bound) bound = glob[k];
+        for (k = 0; k < 5 * T; k++) { uint32_t o = fifq_u32(dir + 20 + 4 * k); if (o > glob[l] && o < bound) bound = o; }
+        fifq_bits_init(&b, f + glob[l], bound - glob[l]);
+        nm = fifq_get(&b, 8);
+        fifq_tp(t, "Level %u models: %u\n", l, nm);
+        for (i = 0; i < nm && i < 3; i++) {
+            unsigned kind = fifq_get(&b, 6), app = fifq_get(&b, 2);
+            int sc = nib[fifq_get(&b, 4)], sb = nib[fifq_get(&b, 4)], ac = nib[fifq_get(&b, 4)], ab = nib[fifq_get(&b, 4)];
+            if (b.err) break;
+            fifq_tp(t, "Level %u model %u: domain kind 0x%02X (%s), components %s, symmetries %d..%d, affine selectors %d..%d\n",
+                    l, i + 1, kind, kind == 0x11 ? "same-scale local" : kind == 0x21 ? "local search" : kind == 0x22 ? "direct index" : "invalid",
+                    app == 1 ? "Y" : app == 2 ? "chroma" : app == 3 ? "Y+chroma" : "none",
+                    sb, sb + sc - 1, ab, ab + ac - 1);
+        }
+    }
+}
+
+static void fifq_info_video(fifq_buf *t, const uint8_t *f, size_t len, int fjf) {
+    unsigned W, H, F;
+    size_t pos = 0x42;
+    unsigned long frames = 0, keyf = 0, pal = 0, delta = 0, minL = 0, maxL = 0, tot = 0;
+    int color;
+    fifq_tp(t, "Format: %s\n", fjf ? "compact-affine FJF video (Part V)" : "P.OEM Video 2.0 fractal video (Part IV)");
+    if (len < 0x42) { fifq_tp(t, "Header: truncated (%lu of 66 bytes)\n", (unsigned long)len); return; }
+    W = fifq_u16(f + 8); H = fifq_u16(f + 10); F = f[0x40];
+    color = fjf || f[6] == 2;
+    fifq_tp(t, "Signature: FTC\\0 "); fifq_thex(t, f + 4, 4); fifq_tp(t, "\n");
+    fifq_tp(t, "Sample layout: %s\n", color ? "planar color (green full, red/blue half resolution, 126-color palette)" : "grayscale");
+    fifq_tp(t, "Width: %u\n", W);
+    fifq_tp(t, "Height: %u\n", H);
+    fifq_tp(t, "Title: \""); fifq_tstr(t, f + 0x1C, fjf ? 32 : 36); fifq_tp(t, "\"\n");
+    fifq_tp(t, "Frames per second: %u\n", F);
+    fifq_tp(t, "Encoder workspace bytes: "); fifq_thex(t, f + 0x0C, 16); fifq_tp(t, "\n");
+    fifq_tp(t, "Encoder field 0x41: 0x%02X\n", f[0x41]);
+    if (fjf) fifq_tp(t, "Terminal frame number: %lu (frames expected: %lu)\n", (unsigned long)fifq_u32(f + 0x3C),
+                     fifq_u32(f + 0x3C) ? (unsigned long)fifq_u32(f + 0x3C) - 1 : 0UL);
+    fifq_tp(t, "Blocks per frame: %lu (4 x 4 pixels)\n", color ? 3UL * W * H / 32 : (unsigned long)W * H / 16);
+    while (pos + 2 <= len) {
+        unsigned L = fifq_u16(f + pos), flags;
+        if (L < 10 || (L & 1) || L > len - pos - 2) break;
+        flags = fifq_u16(f + pos + 2);
+        frames++;
+        if (flags & 1) keyf++;
+        if (flags & 2) pal++;
+        if (flags & 4) delta++;
+        if (!minL || L < minL) minL = L;
+        if (L > maxL) maxL = L;
+        tot += L;
+        pos += 2 + L;
+    }
+    fifq_tp(t, "Frames: %lu\n", frames);
+    if (F) { fifq_tp(t, "Duration: "); fifq_tfix(t, frames, F, 2); fifq_tp(t, " s\n"); }
+    fifq_tp(t, "Fractal key frames (16 iterations): %lu\n", keyf);
+    fifq_tp(t, "Palette updates: %lu\n", pal);
+    if (fjf) fifq_tp(t, "Temporal delta frames: %lu\n", delta);
+    if (frames) {
+        fifq_tp(t, "Smallest frame record: %lu bytes\n", minL);
+        fifq_tp(t, "Largest frame record: %lu bytes\n", maxL);
+        fifq_tp(t, "Average frame record: %lu bytes\n", tot / frames);
+        if (F) fifq_tp(t, "Average data rate: %lu bytes per second\n", tot * F / frames);
+    }
+    if (pos == len) fifq_tp(t, "Record structure: complete\n");
+    else fifq_tp(t, "Record structure: damaged or truncated at offset %lu\n", (unsigned long)pos);
+}
+
+static void fifq_info_stats(fifq_buf *t, const fifq_stats *st, int kind) {
+    static const char *pn[2] = {"Luminance", "Chroma"};
+    static const char *cn[3] = {"Y", "E1", "E2"};
+    int p, c, l;
+    if (kind == 1 || kind == 2) {
+        for (p = 0; p < 2; p++) {
+            long tc = 0, tr = 0;
+            for (c = 0; c < 8; c++) { tc += st->cells[p][c]; tr += st->recs[p][c]; }
+            if (!tc) continue;
+            fifq_tp(t, "%s range blocks by class: %ld (class 0 single: %ld, class 1 in 2x2 groups: %ld, class 2 in 4x4 groups: %ld",
+                    pn[p], tc, st->cells[p][0], st->cells[p][1], st->cells[p][2]);
+            if (st->cells[p][4] + st->cells[p][5] + st->cells[p][6])
+                fifq_tp(t, ", template classes 4/5/6: %ld/%ld/%ld", st->cells[p][4], st->cells[p][5], st->cells[p][6]);
+            fifq_tp(t, ")\n");
+            fifq_tp(t, "%s transform records: %ld (class 0: %ld, class 1: %ld, class 2: %ld)\n",
+                    pn[p], tr, st->recs[p][0], st->recs[p][1], st->recs[p][2]);
+        }
+        if (st->regions) fifq_tp(t, "Regions decoded: %d\n", st->regions);
+        fifq_tp(t, "Convergence sweeps (largest): %d\n", st->sweeps);
+    } else if (kind == 3) {
+        fifq_tp(t, "Tiles decoded: %d\n", st->f1_tiles);
+        for (c = 0; c < 3; c++) {
+            long tot = st->f1_kind[c][0] + st->f1_kind[c][1] + st->f1_kind[c][2];
+            if (!tot && !st->f1_const[c]) continue;
+            fifq_tp(t, "%s transforms: %ld (level 1..4:", cn[c], tot);
+            for (l = 1; l < 5; l++) fifq_tp(t, " %ld", st->f1_tr[c][l]);
+            fifq_tp(t, ")\n");
+            fifq_tp(t, "%s domain kinds: same-scale %ld, local search %ld, direct index %ld\n",
+                    cn[c], st->f1_kind[c][0], st->f1_kind[c][1], st->f1_kind[c][2]);
+            fifq_tp(t, "%s one-pixel constants: %ld\n", cn[c], st->f1_const[c]);
+        }
+    }
 }
 
 /* ======================================================================
@@ -2482,8 +3024,7 @@ static int fifq_read_file(const char *path, uint8_t **data, size_t *len) {
     return FIF_OK;
 }
 
-static int fifq_write_png(const char *pngPath, const fifq_image *img) {
-    fifq_buf file = {0, 0, 0, 0};
+static int fifq_write_file(const char *pngPath, const fifq_buf *file) {
     size_t n = strlen(pngPath);
     char *tmp = (char *)malloc(n + 5);
     FILE *fp;
@@ -2491,12 +3032,10 @@ static int fifq_write_png(const char *pngPath, const fifq_image *img) {
     if (!tmp) return FIF_ERR_MEMORY;
     memcpy(tmp, pngPath, n);
     memcpy(tmp + n, ".tmp", 5);
-    if (!fifq_png_encode(img, &file)) { free(file.p); free(tmp); return FIF_ERR_MEMORY; }
     fp = fopen(tmp, "wb");
-    if (!fp) { free(file.p); free(tmp); return FIF_ERR_WRITE; }
-    ok = fwrite(file.p, 1, file.n, fp) == file.n;
+    if (!fp) { free(tmp); return FIF_ERR_WRITE; }
+    ok = fwrite(file->p, 1, file->n, fp) == file->n;
     if (fclose(fp) != 0) ok = 0;
-    free(file.p);
     if (ok && rename(tmp, pngPath) != 0) {          /* Windows: rename does not replace */
         remove(pngPath);
         ok = rename(tmp, pngPath) == 0;
@@ -2506,40 +3045,124 @@ static int fifq_write_png(const char *pngPath, const fifq_image *img) {
     return ok ? FIF_OK : FIF_ERR_WRITE;
 }
 
+/* 1 fixed FTC, 2 region FTC, 3 FIF1, 4 P.OEM video, 5 FJF video, 6 other FTC, 7 unknown */
+static int fifq_identify(const uint8_t *d, size_t len) {
+    if (len >= 8 && !memcmp(d, "FTC\0", 4)) {
+        if (d[4] == 1 && d[5] == 1 && d[6] == 2 && d[7] == 1) return 1;
+        if (d[4] == 1 && d[5] == 1 && (d[6] == 1 || d[6] == 2) && d[7] == 2) return 4;
+        if (d[4] == 2 && d[5] == 2 && d[6] == 2 && d[7] == 2) return 5;
+        if (d[5] == 3 && d[4] >= 1 && d[4] <= 4) return 2;
+        return 6;
+    }
+    if (len >= 6 && !memcmp(d, "FIF\x01", 4)) return 3;
+    return 7;
+}
+
+/* one memory block: structure + payload (+ NUL) */
+static FIF_RESULT *fifq_make_result(int modus, int err, int w, int h, const uint8_t *data, size_t n, int is_text) {
+    FIF_RESULT *r = NULL;
+    if (data) r = (FIF_RESULT *)malloc(sizeof(FIF_RESULT) + n + 1);
+    if (!r) {
+        r = (FIF_RESULT *)malloc(sizeof(FIF_RESULT));
+        if (!r) return NULL;
+        if (data) err = FIF_ERR_MEMORY;
+        data = NULL;
+    }
+    r->error = err; r->modus = modus; r->width = w; r->height = h;
+    r->data = NULL; r->size = 0; r->text = NULL;
+    if (data) {
+        r->data = (unsigned char *)(r + 1);
+        if (n) memcpy(r->data, data, n);
+        r->data[n] = 0;
+        r->size = n;
+        if (is_text) r->text = (char *)r->data;
+    }
+    return r;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int ConvertLegacyFIFtoPNG(const char *fifPath, const char *pngPath) {
+FIF_RESULT *ConvertLegacyFIFtoPNG(const char *fifPath, const char *pngPath, int modus) {
     uint8_t *d = NULL;
     size_t len = 0;
     fifq_image img;
-    int rc;
-    if (!fifPath || !pngPath || !*fifPath || !*pngPath) return FIF_ERR_ARGUMENT;
-    if (!fifq_has_fif_ext(fifPath)) return FIF_ERR_EXTENSION;
-    rc = fifq_read_file(fifPath, &d, &len);
-    if (rc != FIF_OK) return rc;
+    fifq_stats st;
+    fifq_buf txt = {0, 0, 0, 0}, png = {0, 0, 0, 0};
+    fifq_buf *T = modus == FIF_MODE_INFO ? &txt : NULL;
+    fifq_stats *S = T ? &st : NULL;
+    int rc, kind = 0;
+    FIF_RESULT *res = NULL;
     img.w = img.h = 0; img.rgb = NULL;
-    if (len >= 8 && !memcmp(d, "FTC\0", 4)) {
-        if (d[4] == 1 && d[5] == 1 && d[6] == 2 && d[7] == 1) rc = fifq_decode_fixed(d, len, &img);
-        else if (d[4] == 1 && d[5] == 1 && (d[6] == 1 || d[6] == 2) && d[7] == 2) rc = FIF_ERR_VIDEO;  /* P.OEM Video 2.0 */
-        else if (d[4] == 2 && d[5] == 2 && d[6] == 2 && d[7] == 2) rc = FIF_ERR_VIDEO;                    /* FJF video */
-        else if (d[5] == 3 && d[4] >= 1 && d[4] <= 4) rc = fifq_decode_ftc3(d, len, fifPath, &img);
-        else rc = FIF_ERR_UNSUPPORTED;
-    } else if (len >= 6 && !memcmp(d, "FIF\x01", 4)) {
-        rc = fifq_decode_fif1(d, len, &img);
-    } else {
-        rc = FIF_ERR_UNKNOWN_FORMAT;
+    memset(&st, 0, sizeof st);
+    if (modus < FIF_MODE_FILE || modus > FIF_MODE_INFO) return fifq_make_result(modus, FIF_ERR_MODE, 0, 0, NULL, 0, 0);
+    if (T) {
+        fifq_tp(T, "Library: libfiflegacy\n");
+        fifq_tp(T, "File: %s\n", fifPath ? fifPath : "(null)");
+    }
+    if (!fifPath || !*fifPath || (modus == FIF_MODE_FILE && (!pngPath || !*pngPath))) rc = FIF_ERR_ARGUMENT;
+    else if (!fifq_has_fif_ext(fifPath)) rc = FIF_ERR_EXTENSION;
+    else rc = fifq_read_file(fifPath, &d, &len);
+    if (rc == FIF_OK) {
+        kind = fifq_identify(d, len);
+        if (T) {
+            fifq_tp(T, "File size: %lu bytes\n", (unsigned long)len);
+            switch (kind) {
+            case 1: fifq_info_fixed(T, d, len); break;
+            case 2: fifq_info_ftc3(T, d, len); break;
+            case 3: fifq_info_fif1(T, d, len); break;
+            case 4: fifq_info_video(T, d, len, 0); break;
+            case 5: fifq_info_video(T, d, len, 1); break;
+            case 6:
+                fifq_tp(T, "Format: FTC with unsupported version/profile bytes ");
+                fifq_thex(T, d + 4, 4);
+                fifq_tp(T, "\n");
+                break;
+            default:
+                fifq_tp(T, "Format: unknown (no FTC/FIF1 signature)\n");
+                fifq_tp(T, "First bytes: ");
+                fifq_thex(T, d, len < 16 ? len : 16);
+                fifq_tp(T, "\n");
+            }
+        }
+        switch (kind) {
+        case 1: rc = fifq_decode_fixed(d, len, &img, S); break;
+        case 2: rc = fifq_decode_ftc3(d, len, fifPath, &img, S); break;
+        case 3: rc = fifq_decode_fif1(d, len, &img, S); break;
+        case 4: case 5: rc = FIF_ERR_VIDEO; break;
+        case 6: rc = FIF_ERR_UNSUPPORTED; break;
+        default: rc = FIF_ERR_UNKNOWN_FORMAT;
+        }
     }
     free(d);
-    if (rc == FIF_OK) rc = fifq_write_png(pngPath, &img);
-    free(img.rgb);
-    return rc;
+    if (rc == FIF_OK && modus != FIF_MODE_INFO) {
+        if (!fifq_png_encode(&img, &png)) rc = FIF_ERR_MEMORY;
+        else if (modus == FIF_MODE_FILE) rc = fifq_write_file(pngPath, &png);
+    }
+    if (T) {
+        if (rc == FIF_OK) {
+            fifq_tp(T, "Decodable: yes\n");
+            fifq_tp(T, "Output image: %d x %d pixels, 8-bit RGB (PNG color type 2)\n", img.w, img.h);
+            fifq_info_stats(T, &st, kind);
+        } else if (kind >= 1) {
+            fifq_tp(T, "Decodable: no\n");
+        }
+        if (rc == FIF_OK) fifq_tp(T, "Status: OK\n");
+        else fifq_tp(T, "Status: error %d (%s)\n", rc, fifq_errtext(rc));
+        if (T->err) rc = FIF_ERR_MEMORY;
+        res = fifq_make_result(modus, rc, img.w, img.h, T->err ? NULL : T->p, T->n, 1);
+    } else if (modus == FIF_MODE_MEMORY && rc == FIF_OK) {
+        res = fifq_make_result(modus, rc, img.w, img.h, png.p, png.n, 0);
+    } else {
+        res = fifq_make_result(modus, rc, rc == FIF_OK ? img.w : 0, rc == FIF_OK ? img.h : 0, NULL, 0, 0);
+    }
+    free(img.rgb); free(txt.p); free(png.p);
+    return res;
 }
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* CONVERTLEGACYFIF_DECLARATION_ONLY */
-#endif /* CONVERTLEGACYFIFTOPNG_H */
+#endif /* !LIBFIFLEGACY_DECLARATION_ONLY && !LIBFIFLEGACY_IMPLEMENTED */
