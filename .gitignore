@@ -1,0 +1,17 @@
+# Build output
+*.o
+*.obj
+*.exe
+/fiflegacy
+/dist/
+
+# Converted pictures and test files
+*.png
+*.fif
+*.FIF
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

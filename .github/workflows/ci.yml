@@ -1,0 +1,45 @@
+# Builds fiflegacy on Windows, macOS and Linux on every push and pull request.
+# Release binaries are built locally and uploaded with `gh release create`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build (C99, all warnings)
+        shell: bash
+        run: clang -std=c99 -O2 -Wall -Wextra -o fiflegacy fiflegacy.c
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          ./fiflegacy --version
+          ./fiflegacy --help
+          # wrong usage must exit with 64
+          set +e; ./fiflegacy; rc=$?; set -e
+          [ "$rc" -eq 64 ] || { echo "expected exit 64, got $rc"; exit 1; }
+          # a non-.fif input must fail cleanly, not crash
+          echo x > not-a-fif.txt
+          set +e; ./fiflegacy not-a-fif.txt; rc=$?; set -e
+          [ "$rc" -ge 1 ] && [ "$rc" -le 12 ] || { echo "expected 1..12, got $rc"; exit 1; }
+          echo "smoke test passed"
