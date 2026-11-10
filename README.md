@@ -98,7 +98,7 @@ predecessor of the library, followed by every library version as one commit.
 
 ## License
 
-To be announced.
+FIFlegacy and libFIFlegacy are released under the [MIT License](LICENSE).
 
 Part of the [FIF2 project](https://github.com/FIF2-Project). The FIF2 format:
 [fif2.org](https://fif2.org).
